@@ -6,15 +6,18 @@
     Fragt die Sophos Central API ab und liefert das Ergebnis als PRTG-XML:
       1. OAuth2-Token holen        (https://id.sophos.com/api/v2/oauth2/token)
       2. Tenant + Datenregion      (https://api.central.sophos.com/whoami/v1)
-      3. Endpoints abfragen        ({dataRegion}/endpoint/v1/endpoints)
+      3. Geraete abfragen          ({dataRegion}/endpoint/v1/endpoints bzw.
+                                    {dataRegion}/mobile/v1/devices)
       4. Alerts abfragen           ({dataRegion}/common/v1/alerts)
 
-    Kanaele:
-      - Endpoints Gesamt
-      - Health Gut / Verdaechtig / Schlecht
-      - Tamper Protection deaktiviert
-      - Offline laenger als X Tage
-      - Alerts Hoch / Mittel / Niedrig
+    Mit -DeviceType laesst sich nach Produkt filtern, sodass pro Produkt
+    ein eigener PRTG-Sensor angelegt werden kann:
+      all      = alle Endpoints (Clients + Server, wie Endpoint-API)
+      computer = nur Endpoint Clients (Workstations)
+      server   = nur Endpoint Server
+      mobile   = alle Mobilgeraete (iOS + Android, Sophos Mobile)
+      ios      = nur iOS-Geraete
+      android  = nur Android-Geraete
 
 .PARAMETER ClientId
     Client-ID der Sophos Central API-Anmeldedaten
@@ -22,6 +25,10 @@
 
 .PARAMETER ClientSecret
     Client-Secret der API-Anmeldedaten.
+
+.PARAMETER DeviceType
+    Produktfilter: all | computer | server | mobile | ios | android
+    (Standard: all)
 
 .PARAMETER TenantId
     Optional: Tenant-ID. Nur noetig bei Partner-/Organisations-Anmeldedaten.
@@ -32,10 +39,10 @@
     Wird normalerweise automatisch ermittelt.
 
 .PARAMETER OfflineDays
-    Ab wie vielen Tagen ohne Kontakt ein Endpoint als "offline" zaehlt (Standard: 7).
+    Ab wie vielen Tagen ohne Kontakt ein Geraet als "offline" zaehlt (Standard: 7).
 
 .EXAMPLE
-    .\Sophos-Central-PRTG.ps1 -ClientId "xxxx" -ClientSecret "yyyy"
+    .\Sophos-Central-PRTG.ps1 -ClientId "xxxx" -ClientSecret "yyyy" -DeviceType server
 #>
 
 param(
@@ -44,6 +51,9 @@ param(
 
     [Parameter(Mandatory = $true)]
     [string]$ClientSecret,
+
+    [ValidateSet('all', 'computer', 'server', 'mobile', 'ios', 'android')]
+    [string]$DeviceType = 'all',
 
     [string]$TenantId = "",
 
@@ -80,9 +90,12 @@ function Get-HttpErrorText {
         $resp = $ErrorRecord.Exception.Response
         if ($resp) {
             $status = [int]$resp.StatusCode
-            $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
-            $body   = $reader.ReadToEnd()
-            $reader.Close()
+            $body   = ''
+            if ($resp.GetType().GetMethod('GetResponseStream')) {
+                $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
+                $body   = $reader.ReadToEnd()
+                $reader.Close()
+            }
             if ($body.Length -gt 300) { $body = $body.Substring(0, 300) }
             $text = "HTTP $status - $body"
         }
@@ -143,91 +156,72 @@ $DataRegion = $DataRegion.TrimEnd('/')
 $tenantHeaders = $authHeaders.Clone()
 $tenantHeaders['X-Tenant-ID'] = $TenantId
 
-# =====================================================================
-# 3) Endpoints abfragen (mit Paginierung)
-# =====================================================================
-$endpoints = @()
-try {
-    $uri = "$DataRegion/endpoint/v1/endpoints?pageSize=500"
+# Generische paginierte GET-Abfrage. Unterstuetzt beide Sophos-Stile:
+#   a) pages.nextKey  -> &pageFromKey=...   (Endpoint-/Common-API)
+#   b) pages.current/pages.total -> &page=n (Mobile-API)
+function Get-SophosItems {
+    param(
+        [string]$BaseUri,          # inkl. erster Query-Parameter (?pageSize=...)
+        [hashtable]$Headers,
+        [string]$ErrorContext
+    )
+    $items = @()
+    $uri = $BaseUri
     $pageCount = 0
-    while ($uri -and $pageCount -lt 40) {
-        $pageCount++
-        $page = Invoke-RestMethod -Method Get -Uri $uri -Headers $tenantHeaders -TimeoutSec 60
-        if ($page.items) { $endpoints += $page.items }
-        if ($page.pages.nextKey) {
-            $nextKey = [uri]::EscapeDataString($page.pages.nextKey)
-            $uri = "$DataRegion/endpoint/v1/endpoints?pageSize=500&pageFromKey=$nextKey"
-        } else {
+    try {
+        while ($uri -and $pageCount -lt 100) {
+            $pageCount++
+            $page = Invoke-RestMethod -Method Get -Uri $uri -Headers $Headers -TimeoutSec 60
+            if ($page.items) { $items += $page.items }
             $uri = $null
-        }
-    }
-}
-catch {
-    Out-PrtgError ("Endpoint-Abfrage fehlgeschlagen: " + (Get-HttpErrorText $_))
-}
-
-$totalEndpoints  = $endpoints.Count
-$healthGood      = 0
-$healthSuspect   = 0
-$healthBad       = 0
-$healthUnknown   = 0
-$tamperDisabled  = 0
-$offlineCount    = 0
-
-$offlineLimit = (Get-Date).ToUniversalTime().AddDays(-1 * $OfflineDays)
-
-foreach ($ep in $endpoints) {
-    switch ($ep.health.overall) {
-        'good'       { $healthGood++ }
-        'suspicious' { $healthSuspect++ }
-        'bad'        { $healthBad++ }
-        default      { $healthUnknown++ }
-    }
-    if ($ep.tamperProtectionEnabled -eq $false) { $tamperDisabled++ }
-    if ($ep.lastSeenAt) {
-        try {
-            $lastSeen = [System.DateTimeOffset]::Parse(
-                $ep.lastSeenAt,
-                [System.Globalization.CultureInfo]::InvariantCulture
-            ).UtcDateTime
-            if ($lastSeen -lt $offlineLimit) { $offlineCount++ }
-        } catch { }
-    }
-}
-
-# =====================================================================
-# 4) Alerts abfragen (mit Paginierung)
-# =====================================================================
-$alertsHigh   = 0
-$alertsMedium = 0
-$alertsLow    = 0
-try {
-    $uri = "$DataRegion/common/v1/alerts?pageSize=100"
-    $pageCount = 0
-    while ($uri -and $pageCount -lt 40) {
-        $pageCount++
-        $page = Invoke-RestMethod -Method Get -Uri $uri -Headers $tenantHeaders -TimeoutSec 60
-        foreach ($alert in $page.items) {
-            switch ($alert.severity) {
-                'high'   { $alertsHigh++ }
-                'medium' { $alertsMedium++ }
-                'low'    { $alertsLow++ }
+            if ($page.pages.nextKey) {
+                $nextKey = [uri]::EscapeDataString($page.pages.nextKey)
+                $uri = "$BaseUri&pageFromKey=$nextKey"
+            }
+            elseif ($page.pages.current -and $page.pages.total -and
+                    $page.pages.current -lt $page.pages.total) {
+                $next = [int]$page.pages.current + 1
+                $uri = "$BaseUri&page=$next"
             }
         }
-        if ($page.pages.nextKey) {
-            $nextKey = [uri]::EscapeDataString($page.pages.nextKey)
-            $uri = "$DataRegion/common/v1/alerts?pageSize=100&pageFromKey=$nextKey"
-        } else {
-            $uri = $null
+    }
+    catch {
+        Out-PrtgError ("$ErrorContext fehlgeschlagen: " + (Get-HttpErrorText $_))
+    }
+    return ,$items
+}
+
+# Liest das erste vorhandene Zeitstempel-Feld eines Geraets als UTC-DateTime
+function Get-LastContact {
+    param($Device)
+    foreach ($field in @('lastSeenAt', 'lastSyncedAt', 'lastCheckInAt')) {
+        $value = $Device.$field
+        if ($value) {
+            try {
+                return [System.DateTimeOffset]::Parse(
+                    $value, [System.Globalization.CultureInfo]::InvariantCulture
+                ).UtcDateTime
+            } catch { }
         }
     }
+    return $null
 }
-catch {
-    Out-PrtgError ("Alert-Abfrage fehlgeschlagen: " + (Get-HttpErrorText $_))
+
+$offlineLimit = (Get-Date).ToUniversalTime().AddDays(-1 * $OfflineDays)
+$isMobile = $DeviceType -in @('mobile', 'ios', 'android')
+
+# Zuordnung DeviceType -> Alert-Produktfilter der Common-API
+$alertProducts = switch ($DeviceType) {
+    'computer' { @('endpoint') }
+    'server'   { @('server') }
+    'mobile'   { @('mobile') }
+    'ios'      { @('mobile') }
+    'android'  { @('mobile') }
+    default    { @() }   # all = kein Filter
 }
 
 # =====================================================================
-# 5) PRTG-XML ausgeben
+# 3) Geraete abfragen (je nach Produktfilter)
 # =====================================================================
 $xml = New-Object System.Text.StringBuilder
 [void]$xml.AppendLine('<prtg>')
@@ -255,19 +249,115 @@ function Add-Channel {
     [void]$Builder.AppendLine('  </result>')
 }
 
-Add-Channel $xml 'Endpoints Gesamt'               $totalEndpoints
-Add-Channel $xml 'Health Gut'                     $healthGood
-Add-Channel $xml 'Health Verdaechtig'             $healthSuspect -LimitMaxWarning 0
-Add-Channel $xml 'Health Schlecht'                $healthBad     -LimitMaxError 0
-Add-Channel $xml 'Health Unbekannt'               $healthUnknown
-Add-Channel $xml 'Tamper Protection deaktiviert'  $tamperDisabled -LimitMaxWarning 0
-Add-Channel $xml "Offline laenger $OfflineDays Tage" $offlineCount
-Add-Channel $xml 'Alerts Hoch'                    $alertsHigh    -LimitMaxError 0
-Add-Channel $xml 'Alerts Mittel'                  $alertsMedium  -LimitMaxWarning 0
-Add-Channel $xml 'Alerts Niedrig'                 $alertsLow
+if (-not $isMobile) {
+    # ----- Endpoint-API: Clients und/oder Server -----
+    $endpointUri = "$DataRegion/endpoint/v1/endpoints?pageSize=500"
+    if ($DeviceType -in @('computer', 'server')) {
+        $endpointUri += "&type=$DeviceType"
+    }
+    $endpoints = Get-SophosItems -BaseUri $endpointUri -Headers $tenantHeaders `
+        -ErrorContext 'Endpoint-Abfrage'
 
-$statusText = "$totalEndpoints Endpoints | Gut: $healthGood, Verdaechtig: $healthSuspect, Schlecht: $healthBad | Alerts: $alertsHigh hoch / $alertsMedium mittel / $alertsLow niedrig"
-[void]$xml.AppendLine("  <text>$statusText</text>")
+    $totalDevices   = $endpoints.Count
+    $healthGood     = 0
+    $healthSuspect  = 0
+    $healthBad      = 0
+    $healthUnknown  = 0
+    $tamperDisabled = 0
+    $offlineCount   = 0
+
+    foreach ($ep in $endpoints) {
+        switch ($ep.health.overall) {
+            'good'       { $healthGood++ }
+            'suspicious' { $healthSuspect++ }
+            'bad'        { $healthBad++ }
+            default      { $healthUnknown++ }
+        }
+        if ($ep.tamperProtectionEnabled -eq $false) { $tamperDisabled++ }
+        $lastContact = Get-LastContact $ep
+        if ($lastContact -and $lastContact -lt $offlineLimit) { $offlineCount++ }
+    }
+
+    Add-Channel $xml 'Geraete Gesamt'                 $totalDevices
+    Add-Channel $xml 'Health Gut'                     $healthGood
+    Add-Channel $xml 'Health Verdaechtig'             $healthSuspect -LimitMaxWarning 0
+    Add-Channel $xml 'Health Schlecht'                $healthBad     -LimitMaxError 0
+    Add-Channel $xml 'Health Unbekannt'               $healthUnknown
+    Add-Channel $xml 'Tamper Protection deaktiviert'  $tamperDisabled -LimitMaxWarning 0
+    Add-Channel $xml "Offline laenger $OfflineDays Tage" $offlineCount
+
+    $summary = "$totalDevices Geraete ($DeviceType) | Gut: $healthGood, Verdaechtig: $healthSuspect, Schlecht: $healthBad"
+}
+else {
+    # ----- Mobile-API: iOS / Android -----
+    $devices = Get-SophosItems -BaseUri "$DataRegion/mobile/v1/devices?pageSize=100" `
+        -Headers $tenantHeaders -ErrorContext 'Mobile-Geraete-Abfrage'
+
+    # Plattform pro Geraet ermitteln (Feldname variiert je nach API-Version)
+    function Get-Platform {
+        param($Device)
+        foreach ($value in @($Device.osPlatform, $Device.os.platform, $Device.platform)) {
+            if ($value) { return ([string]$value).ToLowerInvariant() }
+        }
+        return ''
+    }
+
+    if ($DeviceType -in @('ios', 'android')) {
+        $devices = @($devices | Where-Object { (Get-Platform $_) -eq $DeviceType })
+    }
+
+    $totalDevices = $devices.Count
+    $iosCount     = 0
+    $androidCount = 0
+    $otherCount   = 0
+    $offlineCount = 0
+
+    foreach ($dev in $devices) {
+        switch (Get-Platform $dev) {
+            'ios'     { $iosCount++ }
+            'android' { $androidCount++ }
+            default   { $otherCount++ }
+        }
+        $lastContact = Get-LastContact $dev
+        if ($lastContact -and $lastContact -lt $offlineLimit) { $offlineCount++ }
+    }
+
+    Add-Channel $xml 'Geraete Gesamt'   $totalDevices
+    Add-Channel $xml 'Geraete iOS'      $iosCount
+    Add-Channel $xml 'Geraete Android'  $androidCount
+    Add-Channel $xml 'Geraete Andere'   $otherCount
+    Add-Channel $xml "Offline laenger $OfflineDays Tage" $offlineCount
+
+    $summary = "$totalDevices Mobilgeraete ($DeviceType) | iOS: $iosCount, Android: $androidCount"
+}
+
+# =====================================================================
+# 4) Alerts abfragen (nach Produkt gefiltert)
+# =====================================================================
+$alerts = Get-SophosItems -BaseUri "$DataRegion/common/v1/alerts?pageSize=100" `
+    -Headers $tenantHeaders -ErrorContext 'Alert-Abfrage'
+
+$alertsHigh   = 0
+$alertsMedium = 0
+$alertsLow    = 0
+foreach ($alert in $alerts) {
+    if ($alertProducts.Count -gt 0 -and $alert.product -notin $alertProducts) { continue }
+    switch ($alert.severity) {
+        'high'   { $alertsHigh++ }
+        'medium' { $alertsMedium++ }
+        'low'    { $alertsLow++ }
+    }
+}
+
+Add-Channel $xml 'Alerts Hoch'    $alertsHigh   -LimitMaxError 0
+Add-Channel $xml 'Alerts Mittel'  $alertsMedium -LimitMaxWarning 0
+Add-Channel $xml 'Alerts Niedrig' $alertsLow
+
+# =====================================================================
+# 5) PRTG-XML ausgeben
+# =====================================================================
+$summary += " | Alerts: $alertsHigh hoch / $alertsMedium mittel / $alertsLow niedrig"
+[void]$xml.AppendLine("  <text>$summary</text>")
 [void]$xml.AppendLine('</prtg>')
 
 Write-Output $xml.ToString()
