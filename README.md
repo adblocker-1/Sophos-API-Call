@@ -100,3 +100,12 @@ Bei einem Fehler steht die Ursache im `<text>`-Element.
 | `-TenantId` | nein | automatisch | Nur bei Partner-/Org-Anmeldedaten nötig |
 | `-DataRegion` | nein | automatisch | z. B. `https://api-eu01.central.sophos.com` |
 | `-OfflineDays` | nein | `7` | Ab wann ein Endpoint als offline zählt |
+| `-IdentityUrl` | nein | `https://id.sophos.com` | Nur für Tests (Mock-Server) |
+| `-CentralUrl` | nein | `https://api.central.sophos.com` | Nur für Tests (Mock-Server) |
+
+## Getestet
+
+Das Skript wurde mit PowerShell 7 gegen eine simulierte Sophos-Central-API
+(Token, whoami, Endpoints mit Paginierung, Alerts) End-to-End getestet:
+Header (`Authorization`, `X-Tenant-ID`), Token-Request-Body, Paginierung,
+alle Kanalwerte und das PRTG-Fehler-XML wurden verifiziert.

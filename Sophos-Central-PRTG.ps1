@@ -49,7 +49,11 @@ param(
 
     [string]$DataRegion = "",
 
-    [int]$OfflineDays = 7
+    [int]$OfflineDays = 7,
+
+    # Nur fuer Tests: Basis-URLs der Sophos-Dienste ueberschreiben
+    [string]$IdentityUrl = 'https://id.sophos.com',
+    [string]$CentralUrl  = 'https://api.central.sophos.com'
 )
 
 # --- PRTG erwartet UTF-8 auf stdout ---
@@ -97,7 +101,7 @@ try {
         scope         = 'token'
     }
     $tokenResponse = Invoke-RestMethod -Method Post `
-        -Uri 'https://id.sophos.com/api/v2/oauth2/token' `
+        -Uri "$($IdentityUrl.TrimEnd('/'))/api/v2/oauth2/token" `
         -ContentType 'application/x-www-form-urlencoded' `
         -Body $tokenBody `
         -TimeoutSec 30
@@ -119,7 +123,7 @@ $authHeaders = @{
 if (-not $TenantId -or -not $DataRegion) {
     try {
         $whoami = Invoke-RestMethod -Method Get `
-            -Uri 'https://api.central.sophos.com/whoami/v1' `
+            -Uri "$($CentralUrl.TrimEnd('/'))/whoami/v1" `
             -Headers $authHeaders `
             -TimeoutSec 30
 
