@@ -2,31 +2,54 @@
 
 PowerShell-Skript für einen PRTG **EXE/Script Advanced**-Sensor, der Sophos Central
 über die offizielle API abfragt und die Ergebnisse als Kanäle im PRTG-Dashboard anzeigt.
+Über den Parameter `-DeviceType` lässt sich nach Produkt filtern, sodass pro Produkt
+ein eigener Sensor angelegt werden kann.
 
-## Was das Skript abfragt
+## Produktfilter (`-DeviceType`)
+
+| Wert | Bedeutung | Datenquelle |
+|---|---|---|
+| `all` (Standard) | Alle Endpoints (Clients + Server) | `/endpoint/v1/endpoints` |
+| `computer` | Nur Endpoint Clients (Workstations) | `/endpoint/v1/endpoints?type=computer` |
+| `server` | Nur Endpoint Server | `/endpoint/v1/endpoints?type=server` |
+| `mobile` | Alle Mobilgeräte (Sophos Mobile) | `/mobile/v1/devices` |
+| `ios` | Nur iOS-Geräte | `/mobile/v1/devices` (gefiltert) |
+| `android` | Nur Android-Geräte | `/mobile/v1/devices` (gefiltert) |
+
+Die Alerts (`/common/v1/alerts`) werden automatisch passend zum Filter eingeschränkt:
+`computer` → Produkt *endpoint*, `server` → Produkt *server*, `mobile`/`ios`/`android` → Produkt *mobile*,
+`all` → alle Produkte.
+
+## Kanäle
+
+**Bei `all` / `computer` / `server`:**
 
 | Kanal | Quelle | Alarm |
 |---|---|---|
-| Endpoints Gesamt | `/endpoint/v1/endpoints` | – |
-| Health Gut | `health.overall = good` | – |
-| Health Verdaechtig | `health.overall = suspicious` | Warnung bei > 0 |
-| Health Schlecht | `health.overall = bad` | **Fehler bei > 0** |
-| Health Unbekannt | kein Health-Status gemeldet | – |
+| Geraete Gesamt | Anzahl Endpoints | – |
+| Health Gut / Verdaechtig / Schlecht / Unbekannt | `health.overall` | Warnung bei verdächtig > 0, **Fehler bei schlecht > 0** |
 | Tamper Protection deaktiviert | `tamperProtectionEnabled = false` | Warnung bei > 0 |
-| Offline länger X Tage | `lastSeenAt` älter als X Tage (Standard 7) | – |
-| Alerts Hoch | `/common/v1/alerts`, `severity = high` | **Fehler bei > 0** |
-| Alerts Mittel | `severity = medium` | Warnung bei > 0 |
-| Alerts Niedrig | `severity = low` | – |
+| Offline laenger X Tage | `lastSeenAt` älter als X Tage | – |
+| Alerts Hoch / Mittel / Niedrig | `severity` | **Fehler bei hoch > 0**, Warnung bei mittel > 0 |
+
+**Bei `mobile` / `ios` / `android`:**
+
+| Kanal | Quelle | Alarm |
+|---|---|---|
+| Geraete Gesamt | Anzahl Mobilgeräte | – |
+| Geraete iOS / Android / Andere | `osPlatform` | – |
+| Offline laenger X Tage | letzter Sync älter als X Tage | – |
+| Alerts Hoch / Mittel / Niedrig | `severity` (Produkt *mobile*) | **Fehler bei hoch > 0**, Warnung bei mittel > 0 |
 
 Der Sensortext zeigt zusätzlich eine Zusammenfassung, z. B.:
-`142 Endpoints | Gut: 139, Verdaechtig: 2, Schlecht: 1 | Alerts: 0 hoch / 3 mittel / 5 niedrig`
+`142 Geraete (computer) | Gut: 139, Verdaechtig: 2, Schlecht: 1 | Alerts: 0 hoch / 3 mittel / 5 niedrig`
 
 ## Ablauf der API-Abfrage
 
 1. **Token holen**: `POST https://id.sophos.com/api/v2/oauth2/token` (OAuth2 Client Credentials, `scope=token`)
 2. **whoami**: `GET https://api.central.sophos.com/whoami/v1` → liefert Tenant-ID und Datenregion (z. B. `api-eu01`)
-3. **Endpoints**: `GET {dataRegion}/endpoint/v1/endpoints` mit Header `X-Tenant-ID` (inkl. Paginierung)
-4. **Alerts**: `GET {dataRegion}/common/v1/alerts` (inkl. Paginierung)
+3. **Geräte**: Endpoint- oder Mobile-API mit Header `X-Tenant-ID` (inkl. Paginierung)
+4. **Alerts**: `GET {dataRegion}/common/v1/alerts` (inkl. Paginierung, nach Produkt gefiltert)
 
 ## Einrichtung
 
@@ -55,27 +78,25 @@ C:\Program Files (x86)\PRTG Network Monitor\Custom Sensors\EXEXML\
 Auf dem Probe-Server in einer PowerShell ausführen:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File "C:\Program Files (x86)\PRTG Network Monitor\Custom Sensors\EXEXML\Sophos-Central-PRTG.ps1" -ClientId "DEINE-CLIENT-ID" -ClientSecret "DEIN-SECRET"
+powershell -ExecutionPolicy Bypass -File "C:\Program Files (x86)\PRTG Network Monitor\Custom Sensors\EXEXML\Sophos-Central-PRTG.ps1" -ClientId "DEINE-CLIENT-ID" -ClientSecret "DEIN-SECRET" -DeviceType computer
 ```
 
 Erwartete Ausgabe: XML, das mit `<prtg>` beginnt und `<result>`-Blöcke enthält.
 Bei einem Fehler steht die Ursache im `<text>`-Element.
 
-### 4. Sensor in PRTG anlegen
+### 4. Sensoren in PRTG anlegen (einer pro Produkt)
 
 1. Gerät auswählen (z. B. ein Dummy-Gerät „Sophos Central") → **Sensor hinzufügen**
 2. Sensortyp: **EXE/Script (Erweitert)** / **EXE/Script Advanced**
 3. **EXE/Skript**: `Sophos-Central-PRTG.ps1` auswählen
-4. **Parameter**:
+4. **Parameter** — z. B. drei Sensoren:
    ```
-   -ClientId "DEINE-CLIENT-ID" -ClientSecret "DEIN-SECRET"
+   -ClientId "DEINE-CLIENT-ID" -ClientSecret "DEIN-SECRET" -DeviceType computer
+   -ClientId "DEINE-CLIENT-ID" -ClientSecret "DEIN-SECRET" -DeviceType server
+   -ClientId "DEINE-CLIENT-ID" -ClientSecret "DEIN-SECRET" -DeviceType mobile
    ```
-   Optional:
-   ```
-   -OfflineDays 14
-   -TenantId "..." -DataRegion "https://api-eu01.central.sophos.com"
-   ```
-5. **Timeout** des Sensors auf mindestens **120 Sekunden** stellen (bei vielen Endpoints)
+   Optional zusätzlich: `-OfflineDays 14`
+5. **Timeout** des Sensors auf mindestens **120 Sekunden** stellen (bei vielen Geräten)
 6. Abfrageintervall: **5–15 Minuten** genügt (die Sophos-API hat Rate-Limits)
 
 ## Fehlerbehebung („die API-Abfrage funktioniert nicht")
@@ -86,6 +107,7 @@ Bei einem Fehler steht die Ursache im `<text>`-Element.
 | `Die Anfrage wurde abgebrochen: Es konnte kein geschützter SSL/TLS-Kanal erstellt werden` | TLS 1.2 nicht aktiv | Das Skript erzwingt TLS 1.2 bereits; sonst Windows/.NET aktualisieren |
 | Sensor meldet „Ausführung nicht möglich" / Execution Policy | PowerShell Execution Policy blockiert | PRTG startet Skripte mit Bypass; beim manuellen Test `-ExecutionPolicy Bypass` verwenden |
 | `whoami-Abfrage fehlgeschlagen: HTTP 403` | Anmeldedaten haben keine ausreichende Rolle | Rolle **Service Principal ReadOnly** (oder höher) zuweisen |
+| `Mobile-Geraete-Abfrage fehlgeschlagen: HTTP 403/404` | Kein Sophos-Mobile-Produkt lizenziert/aktiv | `-DeviceType mobile/ios/android` nur mit Sophos-Mobile-Lizenz nutzbar |
 | `Die API-Anmeldedaten sind vom Typ 'partner'` | Partner-Anmeldedaten statt Tenant | `-TenantId` und `-DataRegion` als Parameter mitgeben |
 | Timeout / keine Verbindung | Firewall/Proxy blockiert ausgehendes HTTPS | Vom Probe-Server Zugriff auf `id.sophos.com`, `api.central.sophos.com` und `api-<region>.central.sophos.com` (Port 443) freigeben |
 | Sensor zeigt „XML: The returned XML does not match the expected schema" | Skript gibt Fehlermeldung/Warnung vor dem XML aus | Skript manuell auf dem Probe-Server testen und Ausgabe prüfen |
@@ -97,6 +119,17 @@ Bei einem Fehler steht die Ursache im `<text>`-Element.
 |---|---|---|---|
 | `-ClientId` | ja | – | Client-ID der Sophos-API-Anmeldedaten |
 | `-ClientSecret` | ja | – | Client-Secret |
+| `-DeviceType` | nein | `all` | Produktfilter: `all`, `computer`, `server`, `mobile`, `ios`, `android` |
 | `-TenantId` | nein | automatisch | Nur bei Partner-/Org-Anmeldedaten nötig |
 | `-DataRegion` | nein | automatisch | z. B. `https://api-eu01.central.sophos.com` |
-| `-OfflineDays` | nein | `7` | Ab wann ein Endpoint als offline zählt |
+| `-OfflineDays` | nein | `7` | Ab wann ein Gerät als offline zählt |
+| `-IdentityUrl` | nein | `https://id.sophos.com` | Nur für Tests (Mock-Server) |
+| `-CentralUrl` | nein | `https://api.central.sophos.com` | Nur für Tests (Mock-Server) |
+
+## Getestet
+
+Das Skript wurde mit PowerShell 7 gegen eine simulierte Sophos-Central-API
+End-to-End getestet — alle sechs `-DeviceType`-Varianten: Header
+(`Authorization`, `X-Tenant-ID`), Token-Request-Body, `type=`-Filter der
+Endpoint-API, beide Paginierungsstile (nextKey und seitenbasiert),
+Alert-Produktfilter, alle Kanalwerte und das PRTG-Fehler-XML.
