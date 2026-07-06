@@ -63,27 +63,22 @@ Der Sensortext zeigt zusätzlich eine Zusammenfassung, z. B.:
 > Wichtig: Es müssen **Tenant**-Anmeldedaten sein. Bei Partner-/Organisations-Anmeldedaten
 > müssen zusätzlich `-TenantId` und `-DataRegion` als Parameter angegeben werden.
 
-### 2. Skripte auf dem PRTG-Probe-Server ablegen
+### 2. Skript auf dem PRTG-Probe-Server ablegen
 
-**Beide** Dateien kopieren nach:
+Datei `Sophos-Central-PRTG.ps1` kopieren nach:
 
 ```
 C:\Program Files (x86)\PRTG Network Monitor\Custom Sensors\EXEXML\
 ```
 
-- `Sophos-Central-PRTG.ps1` — das eigentliche Skript
-- `Sophos-Central-PRTG.cmd` — Wrapper, der PowerShell mit `-ExecutionPolicy Bypass`
-  startet. **Damit muss die Execution Policy des Systems nicht geändert werden.**
-
 (auf dem Server, auf dem die **Probe** läuft, die den Sensor ausführt — bei Remote Probes auf dem Probe-Server, nicht auf dem Core-Server)
 
 ### 3. Skript einmal manuell testen
 
-Auf dem Probe-Server in einer Eingabeaufforderung (cmd) ausführen — keine
-Anpassung der Execution Policy nötig:
+Auf dem Probe-Server in einer PowerShell ausführen:
 
-```
-"C:\Program Files (x86)\PRTG Network Monitor\Custom Sensors\EXEXML\Sophos-Central-PRTG.cmd" -ClientId "DEINE-CLIENT-ID" -ClientSecret "DEIN-SECRET" -DeviceType computer
+```powershell
+powershell -ExecutionPolicy Bypass -File "C:\Program Files (x86)\PRTG Network Monitor\Custom Sensors\EXEXML\Sophos-Central-PRTG.ps1" -ClientId "DEINE-CLIENT-ID" -ClientSecret "DEIN-SECRET" -DeviceType computer
 ```
 
 Erwartete Ausgabe: XML, das mit `<prtg>` beginnt und `<result>`-Blöcke enthält.
@@ -93,7 +88,7 @@ Bei einem Fehler steht die Ursache im `<text>`-Element.
 
 1. Gerät auswählen (z. B. ein Dummy-Gerät „Sophos Central") → **Sensor hinzufügen**
 2. Sensortyp: **EXE/Script (Erweitert)** / **EXE/Script Advanced**
-3. **EXE/Skript**: `Sophos-Central-PRTG.cmd` auswählen (der Wrapper — umgeht die Execution Policy)
+3. **EXE/Skript**: `Sophos-Central-PRTG.ps1` auswählen
 4. **Parameter** — z. B. drei Sensoren:
    ```
    -ClientId "DEINE-CLIENT-ID" -ClientSecret "DEIN-SECRET" -DeviceType computer
@@ -110,8 +105,7 @@ Bei einem Fehler steht die Ursache im `<text>`-Element.
 |---|---|---|
 | `Token-Abruf fehlgeschlagen … HTTP 401` | Client-ID/Secret falsch oder Secret abgelaufen | Neue API-Anmeldedaten in Sophos Central erstellen |
 | `Die Anfrage wurde abgebrochen: Es konnte kein geschützter SSL/TLS-Kanal erstellt werden` | TLS 1.2 nicht aktiv | Das Skript erzwingt TLS 1.2 bereits; sonst Windows/.NET aktualisieren |
-| Sensor meldet „Ausführung nicht möglich" / Execution Policy | PowerShell Execution Policy blockiert | Die `.cmd`-Datei statt der `.ps1` als Sensor-Skript auswählen (startet mit `-ExecutionPolicy Bypass`) |
-| Execution Policy blockiert trotz `.cmd`-Wrapper | Policy per **Gruppenrichtlinie** (MachinePolicy) erzwungen | GPO kann per Kommandozeile nicht umgangen werden — Ausnahme durch die AD-Administration nötig |
+| Sensor meldet „Ausführung nicht möglich" / Execution Policy | PowerShell Execution Policy blockiert | PRTG startet Skripte mit Bypass; beim manuellen Test `-ExecutionPolicy Bypass` verwenden |
 | `whoami-Abfrage fehlgeschlagen: HTTP 403` | Anmeldedaten haben keine ausreichende Rolle | Rolle **Service Principal ReadOnly** (oder höher) zuweisen |
 | `Mobile-Geraete-Abfrage fehlgeschlagen: HTTP 403/404` | Kein Sophos-Mobile-Produkt lizenziert/aktiv | `-DeviceType mobile/ios/android` nur mit Sophos-Mobile-Lizenz nutzbar |
 | `Die API-Anmeldedaten sind vom Typ 'partner'` | Partner-Anmeldedaten statt Tenant | `-TenantId` und `-DataRegion` als Parameter mitgeben |
