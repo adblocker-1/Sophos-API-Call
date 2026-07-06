@@ -63,9 +63,9 @@ Der Sensortext zeigt zusätzlich eine Zusammenfassung, z. B.:
 > Wichtig: Es müssen **Tenant**-Anmeldedaten sein. Bei Partner-/Organisations-Anmeldedaten
 > müssen zusätzlich `-TenantId` und `-DataRegion` als Parameter angegeben werden.
 
-### 2. Skript auf dem PRTG-Probe-Server ablegen
+### 2. Skripte auf dem PRTG-Probe-Server ablegen
 
-Datei `Sophos-Central-PRTG.ps1` kopieren nach:
+Die Dateien `Sophos-Central-PRTG.ps1` und `Sign-SophosScript.ps1` kopieren nach:
 
 ```
 C:\Program Files (x86)\PRTG Network Monitor\Custom Sensors\EXEXML\
@@ -73,18 +73,54 @@ C:\Program Files (x86)\PRTG Network Monitor\Custom Sensors\EXEXML\
 
 (auf dem Server, auf dem die **Probe** läuft, die den Sensor ausführt — bei Remote Probes auf dem Probe-Server, nicht auf dem Core-Server)
 
-### 3. Skript einmal manuell testen
+### 3. Skript signieren (keine Änderung der Execution Policy nötig)
+
+Damit das Skript unter `AllSigned`/`RemoteSigned` läuft, wird es mit einem
+Code-Signing-Zertifikat (Authenticode) signiert. Dafür liegt das Hilfsskript
+`Sign-SophosScript.ps1` bei. Einmalig auf dem Probe-Server in einer
+**PowerShell als Administrator** ausführen:
+
+```powershell
+cd "C:\Program Files (x86)\PRTG Network Monitor\Custom Sensors\EXEXML"
+
+# Variante A: selbstsigniertes Zertifikat erstellen lassen (einfachster Weg)
+.\Sign-SophosScript.ps1
+
+# Variante B: vorhandenes Code-Signing-Zertifikat der Firmen-CA verwenden
+.\Sign-SophosScript.ps1 -Thumbprint "A1B2C3D4E5F6..."
+
+# Variante C: Zertifikat aus PFX-Datei verwenden
+.\Sign-SophosScript.ps1 -PfxPath "C:\Zertifikate\codesign.pfx"
+```
+
+Das Hilfsskript erstellt/lädt das Zertifikat, importiert es in die
+Computer-Speicher **Vertrauenswürdige Stammzertifizierungsstellen** und
+**Vertrauenswürdige Herausgeber** (damit auch das PRTG-Probe-Dienstkonto der
+Signatur vertraut), signiert `Sophos-Central-PRTG.ps1` mit SHA256 und
+Zeitstempel und prüft die Signatur.
+
+> **Wichtig:** Nach jeder Änderung an `Sophos-Central-PRTG.ps1` (auch nur einem
+> Zeichen) muss das Signier-Skript erneut ausgeführt werden, sonst ist die
+> Signatur ungültig.
+
+> Hinweis: Beim allerersten Ausführen von `Sign-SophosScript.ps1` selbst kann die
+> Execution Policy greifen (das Signier-Skript ist ja noch unsigniert). In dem Fall
+> einmalig so starten — das ändert die Policy nicht dauerhaft, sondern gilt nur für
+> diesen einen Aufruf:
+> `powershell -ExecutionPolicy Bypass -File .\Sign-SophosScript.ps1`
+
+### 4. Skript einmal manuell testen
 
 Auf dem Probe-Server in einer PowerShell ausführen:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File "C:\Program Files (x86)\PRTG Network Monitor\Custom Sensors\EXEXML\Sophos-Central-PRTG.ps1" -ClientId "DEINE-CLIENT-ID" -ClientSecret "DEIN-SECRET" -DeviceType computer
+& "C:\Program Files (x86)\PRTG Network Monitor\Custom Sensors\EXEXML\Sophos-Central-PRTG.ps1" -ClientId "DEINE-CLIENT-ID" -ClientSecret "DEIN-SECRET" -DeviceType computer
 ```
 
 Erwartete Ausgabe: XML, das mit `<prtg>` beginnt und `<result>`-Blöcke enthält.
 Bei einem Fehler steht die Ursache im `<text>`-Element.
 
-### 4. Sensoren in PRTG anlegen (einer pro Produkt)
+### 5. Sensoren in PRTG anlegen (einer pro Produkt)
 
 1. Gerät auswählen (z. B. ein Dummy-Gerät „Sophos Central") → **Sensor hinzufügen**
 2. Sensortyp: **EXE/Script (Erweitert)** / **EXE/Script Advanced**
@@ -105,7 +141,8 @@ Bei einem Fehler steht die Ursache im `<text>`-Element.
 |---|---|---|
 | `Token-Abruf fehlgeschlagen … HTTP 401` | Client-ID/Secret falsch oder Secret abgelaufen | Neue API-Anmeldedaten in Sophos Central erstellen |
 | `Die Anfrage wurde abgebrochen: Es konnte kein geschützter SSL/TLS-Kanal erstellt werden` | TLS 1.2 nicht aktiv | Das Skript erzwingt TLS 1.2 bereits; sonst Windows/.NET aktualisieren |
-| Sensor meldet „Ausführung nicht möglich" / Execution Policy | PowerShell Execution Policy blockiert | PRTG startet Skripte mit Bypass; beim manuellen Test `-ExecutionPolicy Bypass` verwenden |
+| Sensor meldet „Ausführung nicht möglich" / Execution Policy | Skript ist nicht (mehr) signiert | `Sign-SophosScript.ps1` als Administrator ausführen — auch nach jeder Änderung an der `.ps1` erneut nötig |
+| Signatur wird trotz Signierung nicht akzeptiert | Zertifikat fehlt in Root/TrustedPublisher des **Computers**, oder GPO erlaubt nur bestimmte Herausgeber | Signier-Skript als Administrator ausführen (importiert in die Computer-Speicher); bei GPO-Vorgaben ein Zertifikat der Firmen-CA verwenden (`-Thumbprint`/`-PfxPath`) |
 | `whoami-Abfrage fehlgeschlagen: HTTP 403` | Anmeldedaten haben keine ausreichende Rolle | Rolle **Service Principal ReadOnly** (oder höher) zuweisen |
 | `Mobile-Geraete-Abfrage fehlgeschlagen: HTTP 403/404` | Kein Sophos-Mobile-Produkt lizenziert/aktiv | `-DeviceType mobile/ios/android` nur mit Sophos-Mobile-Lizenz nutzbar |
 | `Die API-Anmeldedaten sind vom Typ 'partner'` | Partner-Anmeldedaten statt Tenant | `-TenantId` und `-DataRegion` als Parameter mitgeben |
